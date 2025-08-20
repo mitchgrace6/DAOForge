@@ -1,12 +1,4 @@
-;; DAOForge Smart Contract - Commit 2
-;; Adding proposal creation, voting mechanisms, and enhanced member management
 
-;; Previous code from Commit 1...
-;; [Include all constants, data structures, and basic functions from Commit 1]
-
-;; =================================
-;; ADDITIONAL PRIVATE FUNCTIONS FOR PROPOSALS
-;; =================================
 
 ;; Validate proposal parameters
 (define-private (is-valid-proposal (title (string-utf8 100)) (amount uint) (target (optional principal)))
