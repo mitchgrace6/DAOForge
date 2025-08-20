@@ -1,12 +1,96 @@
-;; DAOForge Smart Contract - Commit 2
-;; Adding proposal creation, voting mechanisms, and enhanced member management
-
-;; Previous code from Commit 1...
-;; [Include all constants, data structures, and basic functions from Commit 1]
+;; DAOForge Smart Contract - Complete Implementation
+;; A comprehensive DAO governance system with token-based voting
 
 ;; =================================
-;; ADDITIONAL PRIVATE FUNCTIONS FOR PROPOSALS
+;; CONSTANTS
 ;; =================================
+
+(define-constant VOTING-PERIOD u10080) ;; 7 days in blocks (assuming 10 min blocks)
+(define-constant EXECUTION-DELAY u1440) ;; 1 day delay after voting ends
+(define-constant MINIMUM-QUORUM u100) ;; Minimum tokens required for quorum
+(define-constant QUORUM-PERCENTAGE u51) ;; 51% of total supply for quorum
+
+;; =================================
+;; ERROR CODES
+;; =================================
+
+(define-constant ERR-UNAUTHORIZED (err u1001))
+(define-constant ERR-INSUFFICIENT-TOKENS (err u1002))
+(define-constant ERR-INVALID-PROPOSAL (err u1003))
+(define-constant ERR-VOTING-PERIOD-ENDED (err u1004))
+(define-constant ERR-ALREADY-VOTED (err u1005))
+(define-constant ERR-PROPOSAL-NOT-FOUND (err u1006))
+(define-constant ERR-PROPOSAL-NOT-ACTIVE (err u1007))
+(define-constant ERR-INSUFFICIENT-BALANCE (err u1008))
+
+;; =================================
+;; DATA STRUCTURES
+;; =================================
+
+;; Member information
+(define-data-var dao-name (string-ascii 50) "DAOForge")
+(define-data-var dao-description (string-ascii 200) "A decentralized autonomous organization for governance")
+(define-data-var total-supply uint u1000000) ;; 1 million tokens
+(define-data-var treasury-balance uint u0)
+(define-data-var proposal-count uint u0)
+
+;; Token balances
+(define-map token-balances principal uint)
+
+;; DAO members with their stats
+(define-map dao-members principal {
+    joined-at: uint,
+    voting-power: uint,
+    proposals-created: uint,
+    votes-cast: uint
+})
+
+;; Proposals
+(define-map proposals uint {
+    proposer: principal,
+    title: (string-utf8 100),
+    description: (string-utf8 1000),
+    proposal-type: (string-ascii 20),
+    target: (optional principal),
+    amount: uint,
+    created-at: uint,
+    voting-end: uint,
+    execution-delay-end: uint,
+    status: (string-ascii 20),
+    votes-for: uint,
+    votes-against: uint,
+    total-votes: uint,
+    quorum-required: uint
+})
+
+;; Individual votes on proposals
+(define-map proposal-votes {
+    proposal-id: uint,
+    voter: principal
+} {
+    vote: bool,
+    voting-power: uint,
+    voted-at: uint
+})
+
+;; =================================
+;; PRIVATE FUNCTIONS - CORE LOGIC
+;; =================================
+
+;; Get voting power (token balance) for a member
+(define-private (get-voting-power (member principal))
+    (default-to u0 (map-get? token-balances member))
+)
+
+;; Check if address is a DAO member (has tokens)
+(define-private (is-dao-member (member principal))
+    (> (get-voting-power member) u0)
+)
+
+;; Calculate quorum requirement based on total supply
+(define-private (calculate-quorum)
+    (/ (* (var-get total-supply) QUORUM-PERCENTAGE) u100)
+)
 
 ;; Validate proposal parameters
 (define-private (is-valid-proposal (title (string-utf8 100)) (amount uint) (target (optional principal)))
@@ -43,6 +127,43 @@
             (has-quorum proposal-id)
             (> (get votes-for proposal-data) (get votes-against proposal-data)))
         false
+    )
+)
+
+;; =================================
+;; PUBLIC FUNCTIONS - TOKEN MANAGEMENT
+;; =================================
+
+;; Transfer tokens between accounts
+(define-public (transfer (amount uint) (sender principal) (recipient principal) (memo (optional (buff 34))))
+    (begin
+        (asserts! (is-eq tx-sender sender) ERR-UNAUTHORIZED)
+        (asserts! (>= (get-voting-power sender) amount) ERR-INSUFFICIENT-BALANCE)
+        (asserts! (> amount u0) ERR-INSUFFICIENT-BALANCE)
+        
+        ;; Update sender balance
+        (map-set token-balances sender (- (get-voting-power sender) amount))
+        
+        ;; Update recipient balance
+        (map-set token-balances recipient (+ (get-voting-power recipient) amount))
+        
+        ;; Update member status if needed
+        (if (and (is-eq (get-voting-power sender) u0) (is-dao-member sender))
+            (map-delete dao-members sender)
+            (map-set dao-members sender 
+                (merge (default-to {joined-at: block-height, voting-power: u0, proposals-created: u0, votes-cast: u0} 
+                       (map-get? dao-members sender))
+                       {voting-power: (get-voting-power sender)})))
+        
+        (if (and (> (get-voting-power recipient) u0) (not (is-dao-member recipient)))
+            (map-set dao-members recipient 
+                {joined-at: block-height, voting-power: (get-voting-power recipient), proposals-created: u0, votes-cast: u0})
+            (map-set dao-members recipient 
+                (merge (default-to {joined-at: block-height, voting-power: u0, proposals-created: u0, votes-cast: u0} 
+                       (map-get? dao-members recipient))
+                       {voting-power: (get-voting-power recipient)})))
+        
+        (ok true)
     )
 )
 
@@ -113,19 +234,22 @@
             {vote: vote-for, voting-power: voter-power, voted-at: block-height})
         
         ;; Update proposal vote counts
-        (match (map-get? proposals proposal-id)
+        (unwrap! (match (map-get? proposals proposal-id)
             proposal-data 
-            (map-set proposals proposal-id 
-                (merge proposal-data {
-                    votes-for: (if vote-for 
-                                  (+ (get votes-for proposal-data) voter-power)
-                                  (get votes-for proposal-data)),
-                    votes-against: (if vote-for 
-                                      (get votes-against proposal-data)
-                                      (+ (get votes-against proposal-data) voter-power)),
-                    total-votes: (+ (get total-votes proposal-data) voter-power)
-                }))
+            (begin
+                (map-set proposals proposal-id 
+                    (merge proposal-data {
+                        votes-for: (if vote-for 
+                                      (+ (get votes-for proposal-data) voter-power)
+                                      (get votes-for proposal-data)),
+                        votes-against: (if vote-for 
+                                          (get votes-against proposal-data)
+                                          (+ (get votes-against proposal-data) voter-power)),
+                        total-votes: (+ (get total-votes proposal-data) voter-power)
+                    }))
+                (ok true))
             (err ERR-PROPOSAL-NOT-FOUND))
+            ERR-PROPOSAL-NOT-FOUND)
         
         ;; Update member voting stats
         (map-set dao-members tx-sender 
